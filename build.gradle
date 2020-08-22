@@ -1,0 +1,29 @@
+plugins {
+    id 'java'
+    id 'maven-publish'
+    id 'maven'
+}
+
+group 'io.izzel.arclight'
+version '1.0.0'
+
+repositories {
+    jcenter()
+    maven { url = 'https://repo.spongepowered.org/maven' }
+}
+
+dependencies {
+    implementation 'org.spongepowered:mixin:0.8'
+    implementation 'org.ow2.asm:asm:8.0.1'
+    implementation 'org.ow2.asm:asm-tree:8.0.1'
+    implementation 'com.google.guava:guava:29.0-jre'
+    implementation 'org.apache.logging.log4j:log4j-core:2.13.3'
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}
