@@ -27,14 +27,14 @@ import java.util.Arrays;
 
 public class Ejector extends Injector {
 
-    static class IndirectInvokeData extends InjectorData {
+    static class EjectInvokeData extends InjectorData {
 
         final MethodInsnNode node;
         final Type returnType;
         final Type[] targetArgs;
         final Type[] handlerArgs;
 
-        IndirectInvokeData(Target target, MethodInsnNode node) {
+        EjectInvokeData(Target target, MethodInsnNode node) {
             super(target);
             this.node = node;
             this.returnType = Type.getReturnType(node.desc);
@@ -70,7 +70,7 @@ public class Ejector extends Injector {
     }
 
     private void injectAtInvoke(Target target, InjectionNodes.InjectionNode node) {
-        IndirectInvokeData data = new IndirectInvokeData(target, ((MethodInsnNode) node.getCurrentTarget()));
+        EjectInvokeData data = new EjectInvokeData(target, ((MethodInsnNode) node.getCurrentTarget()));
         this.validateIndirectParams(data, data.returnType, data.handlerArgs);
         InsnList insnList = new InsnList();
 
@@ -110,7 +110,7 @@ public class Ejector extends Injector {
         }
     }
 
-    protected AbstractInsnNode invokeCallback(Target target, InsnList insnList, IndirectInvokeData data, Target.Extension extraLocals, Target.Extension extraStack) {
+    protected AbstractInsnNode invokeCallback(Target target, InsnList insnList, EjectInvokeData data, Target.Extension extraLocals, Target.Extension extraStack) {
         extraLocals.add(data.handlerArgs).add(2);
         extraStack.add(2);
         int[] argMap = this.storeArgs(target, data.handlerArgs, insnList, 0);
@@ -140,7 +140,7 @@ public class Ejector extends Injector {
         callback.add(new VarInsnNode(Opcodes.ASTORE, this.callbackInfoVar));
     }
 
-    protected final void validateIndirectParams(IndirectInvokeData injector, Type returnType, Type... args) {
+    protected final void validateIndirectParams(EjectInvokeData injector, Type returnType, Type... args) {
         String description = String.format("%s %s method %s from %s", this.annotationType, injector, this, this.info.getContext());
         int argIndex = 0;
         try {
