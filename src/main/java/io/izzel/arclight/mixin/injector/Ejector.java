@@ -141,7 +141,7 @@ public class Ejector extends Injector {
     }
 
     protected final void validateIndirectParams(EjectInvokeData injector, Type returnType, Type... args) {
-        String description = String.format("%s %s method %s from %s", this.annotationType, injector, this, this.info.getContext());
+        String description = String.format("%s %s method %s from %s", this.annotationType, injector, this, this.info.toString());
         int argIndex = 0;
         try {
             injector.coerceReturnType = this.checkCoerce(-1, returnType, description, injector.allowCoerceArgs);

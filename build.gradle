@@ -5,7 +5,7 @@ plugins {
 }
 
 group 'io.izzel.arclight'
-version '1.0.0'
+version '1.0.1'
 
 repositories {
     jcenter()
@@ -13,14 +13,24 @@ repositories {
 }
 
 dependencies {
-    implementation 'org.spongepowered:mixin:0.8'
-    implementation 'org.ow2.asm:asm:8.0.1'
-    implementation 'org.ow2.asm:asm-tree:8.0.1'
-    implementation 'com.google.guava:guava:29.0-jre'
-    implementation 'org.apache.logging.log4j:log4j-core:2.13.3'
+    compileOnly 'org.spongepowered:mixin:0.8.3'
+    compileOnly 'org.ow2.asm:asm:8.0.1'
+    compileOnly 'org.ow2.asm:asm-tree:8.0.1'
+    compileOnly 'com.google.guava:guava:29.0-jre'
+    compileOnly 'org.apache.logging.log4j:log4j-core:2.13.3'
 }
 
 publishing {
+    repositories {
+        maven {
+            name = "IzzelAliz"
+            url = uri("https://maven.izzel.io/releases")
+            credentials {
+                username = project.findProperty("gpr.user") ?: System.getenv("USERNAME")
+                password = project.findProperty("gpr.key") ?: System.getenv("TOKEN")
+            }
+        }
+    }
     publications {
         mavenJava(MavenPublication) {
             from components.java
