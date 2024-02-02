@@ -2,6 +2,7 @@ package io.izzel.arclight.mixin.ap;
 
 import io.izzel.arclight.mixin.injector.EjectorInfo;
 import org.spongepowered.asm.mixin.injection.struct.InjectionInfo;
+import org.spongepowered.asm.util.logging.MessageRouter;
 
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.ProcessingEnvironment;
@@ -12,6 +13,13 @@ import java.util.Collections;
 import java.util.Set;
 
 public class EjectProvider extends AbstractProcessor {
+
+    static {
+        try {
+            MessageRouter.setMessager(new StdoutMessenger());
+        } catch (NoClassDefFoundError ignored) {
+        }
+    }
 
     @Override
     public synchronized void init(ProcessingEnvironment processingEnv) {
