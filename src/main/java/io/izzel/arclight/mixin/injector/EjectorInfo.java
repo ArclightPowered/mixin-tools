@@ -24,4 +24,9 @@ public class EjectorInfo extends InjectionInfo {
     protected String getDescription() {
         return "Eject";
     }
+
+    @Override
+    public void inject() {
+        super.inject();
+    }
 }

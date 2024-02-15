@@ -1,7 +1,5 @@
 package io.izzel.arclight.mixin.injector;
 
-import com.google.common.collect.ObjectArrays;
-import com.google.common.primitives.Ints;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -39,9 +37,13 @@ public class Ejector extends Injector {
             this.node = node;
             this.returnType = Type.getReturnType(node.desc);
             this.targetArgs = Type.getArgumentTypes(node.desc);
-            this.handlerArgs = node.getOpcode() == Opcodes.INVOKESTATIC
-                ? this.targetArgs
-                : ObjectArrays.concat(Type.getObjectType(node.owner), this.targetArgs);
+            var handlerArgs = this.targetArgs;
+            if (node.getOpcode() != Opcodes.INVOKESTATIC) {
+                handlerArgs = new Type[this.targetArgs.length + 1];
+                handlerArgs[0] = Type.getObjectType(node.owner);
+                System.arraycopy(this.targetArgs, 0, handlerArgs, 1, this.targetArgs.length);
+            }
+            this.handlerArgs = handlerArgs;
         }
 
     }
@@ -114,14 +116,16 @@ public class Ejector extends Injector {
         extraLocals.add(data.handlerArgs).add(2);
         extraStack.add(2);
         int[] argMap = this.storeArgs(target, data.handlerArgs, insnList, 0);
-        argMap = Ints.concat(argMap, new int[]{this.callbackInfoVar});
+        var newArgsMap = new int[argMap.length + data.captureTargetArgs + 1];
+        System.arraycopy(argMap, 0, newArgsMap, 0, argMap.length);
+        newArgsMap[argMap.length] = this.callbackInfoVar;
         if (data.captureTargetArgs > 0) {
             int argSize = Bytecode.getArgsSize(target.arguments, 0, data.captureTargetArgs);
             extraLocals.add(argSize);
             extraStack.add(argSize);
-            argMap = Ints.concat(argMap, target.getArgIndices());
+            System.arraycopy(target.getArgIndices(), 0, newArgsMap, argMap.length + 1, data.captureTargetArgs);
         }
-        AbstractInsnNode champion = this.invokeHandlerWithArgs(this.methodArgs, insnList, argMap);
+        AbstractInsnNode champion = this.invokeHandlerWithArgs(this.methodArgs, insnList, newArgsMap);
         if (data.coerceReturnType && data.returnType.getSort() >= Type.ARRAY) {
             insnList.add(new TypeInsnNode(Opcodes.CHECKCAST, data.returnType.getInternalName()));
         }
@@ -169,9 +173,13 @@ public class Ejector extends Injector {
                 injector.captureTargetArgs++;
             }
         } catch (InvalidInjectionException ex) {
-            String expected = this.methodArgs.length > args.length
-                ? Bytecode.generateDescriptor(returnType, ObjectArrays.concat(args, injector.target.arguments, Type.class))
-                : Bytecode.generateDescriptor(returnType, args);
+            var expectedArgs = args;
+            if (this.methodArgs.length > args.length) {
+                expectedArgs = new Type[args.length + injector.target.arguments.length];
+                System.arraycopy(args, 0, expectedArgs, 0, args.length);
+                System.arraycopy(injector.target.arguments, 0, expectedArgs, args.length, injector.target.arguments.length);
+            }
+            String expected = Bytecode.generateDescriptor(returnType, expectedArgs);
             throw new InvalidInjectionException(this.info, String.format("%s. Handler signature: %s Expected signature: %s", ex.getMessage(),
                 this.methodNode.desc, expected));
         }
