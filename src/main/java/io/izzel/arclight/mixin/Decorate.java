@@ -9,12 +9,9 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-/**
- * Same with Redirect, but inlines
- */
 @Target({ElementType.METHOD})
 @Retention(RetentionPolicy.RUNTIME)
-public @interface InlineRedirect {
+public @interface Decorate {
 
     String[] method() default {};
 

@@ -1,5 +1,6 @@
 package io.izzel.arclight.mixin.ap;
 
+import io.izzel.arclight.mixin.MixinTools;
 import io.izzel.arclight.mixin.injector.EjectorInfo;
 import org.spongepowered.asm.mixin.injection.struct.InjectionInfo;
 import org.spongepowered.asm.util.logging.MessageRouter;
@@ -24,7 +25,7 @@ public class EjectProvider extends AbstractProcessor {
     @Override
     public synchronized void init(ProcessingEnvironment processingEnv) {
         super.init(processingEnv);
-        InjectionInfo.register(EjectorInfo.class);
+        MixinTools.setup();
     }
 
     @Override
