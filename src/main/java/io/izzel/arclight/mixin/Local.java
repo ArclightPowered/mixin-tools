@@ -9,5 +9,7 @@ import java.lang.annotation.Target;
 @Target(ElementType.PARAMETER)
 public @interface Local {
 
-    int ordinal();
+    int ordinal() default Integer.MIN_VALUE;
+
+    String allocate() default "";
 }

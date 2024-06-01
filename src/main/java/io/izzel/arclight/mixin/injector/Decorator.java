@@ -14,6 +14,7 @@ import org.spongepowered.asm.mixin.injection.struct.InjectionInfo;
 import org.spongepowered.asm.mixin.injection.struct.InjectionNodes.InjectionNode;
 import org.spongepowered.asm.mixin.injection.struct.Target;
 import org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException;
+import org.spongepowered.asm.util.Annotations;
 import org.spongepowered.asm.util.Locals;
 
 import java.lang.invoke.MethodHandle;
@@ -216,7 +217,8 @@ public class Decorator extends Injector {
         for (var invoke : cancels.values()) {
             var methodType = Type.getMethodType(invoke.desc);
             var argumentTypes = methodType.getArgumentTypes();
-            if (argumentTypes.length != 1 || !argumentTypes[0].equals(target.returnType)) {
+            if ((target.returnType.equals(Type.VOID_TYPE) && argumentTypes.length != 0) ||
+                (!target.returnType.equals(Type.VOID_TYPE) && (argumentTypes.length != 1 || !argumentTypes[0].equals(target.returnType)))) {
                 throw new InvalidInjectionException(this.info,
                     "Invalid DecorationOps.cancel argument types: bci "
                         + this.methodNode.instructions.indexOf(invoke));
@@ -384,8 +386,13 @@ public class Decorator extends Injector {
             lvIndex += this.methodArgs[i].getSize();
             offset += this.methodArgs[i].getSize();
         }
+        var handlerLocalsOffset = offset;
         for (int i = localsStart; i < this.methodArgs.length; i++) {
-            lvtMap[lvIndex] = findLv(i, lvns);
+            handlerLocalsOffset += this.methodArgs[i].getSize();
+        }
+        decorationData.handlerLocalsOffset = handlerLocalsOffset;
+        for (int i = localsStart; i < this.methodArgs.length; i++) {
+            lvtMap[lvIndex] = findLv(target, decorationData, i, lvns);
             lvIndex += this.methodArgs[i].getSize();
             offset += this.methodArgs[i].getSize();
         }
@@ -393,27 +400,50 @@ public class Decorator extends Injector {
             lvtMap[lvIndex] = lvIndex - offset + decorationData.handlerLocalsStart;
             lvIndex++;
         }
-        decorationData.handlerLocalsOffset = offset;
         return lvtMap;
     }
 
-    private int findLv(int i, LocalVariableNode[] locals) {
+    private int findLv(Target target, DecorationData decorationData, int i, LocalVariableNode[] locals) {
         var type = this.methodArgs[i];
         AnnotationNode localNode;
         if (this.methodNode.invisibleAnnotableParameterCount > i &&
             (localNode = this.methodNode.invisibleParameterAnnotations[i].stream()
                 .filter(it -> it.desc.equals(LOCAL_DESC)).findAny().orElse(null)) != null) {
-            var index = (Integer) localNode.values.get(1);
-            var lvns = Arrays.stream(locals).filter(it -> Type.getType(it.desc).equals(type)).toList();
-            if (index < 0) {
-                index = lvns.size() + index;
+            var index = Annotations.<Integer>getValue(localNode, "ordinal");
+            var allocate = Annotations.<String>getValue(localNode, "allocate");
+            if (index != null && allocate != null) {
+                throw new InvalidInjectionException(this.info, "Only one of 'ordinal' and 'allocate' can exist on @Local at parameter " + i);
             }
-            if (index < lvns.size()) {
-                return lvns.get(index).index;
+            if (index != null) {
+                var lvns = Arrays.stream(locals).filter(it -> Type.getType(it.desc).equals(type)).toList();
+                if (index < 0) {
+                    index = lvns.size() + index;
+                }
+                if (index < lvns.size()) {
+                    return lvns.get(index).index;
+                } else {
+                    throw new InvalidInjectionException(this.info, "Cannot find local at " + i + " with ordinal " + localNode.values.get(1) + "\n"
+                        + "Available locals:\n"
+                        + lvns.stream().map(it -> "Index: " + it.index + " Type " + it.desc + " Name " + it.name).collect(Collectors.joining("\n")));
+                }
+            } else if (allocate != null) {
+                var allocated = target.method.localVariables.stream().filter(it -> it instanceof AllocatedLocalVariableNode al && al.id.equals(allocate)).findFirst();
+                if (allocated.isPresent()) {
+                    if (!allocated.get().desc.equals(this.methodArgs[i].getDescriptor())) {
+                        throw new InvalidInjectionException(this.info, "@Local allocate has different desc "
+                            + this.methodArgs[i].getDescriptor() + " and " + allocated.get().desc);
+                    }
+                    return allocated.get().index;
+                } else {
+                    var allocateStart = Math.max(target.method.maxLocals,
+                        this.methodNode.maxLocals - decorationData.handlerLocalsOffset + decorationData.handlerLocalsStart);
+                    target.method.maxLocals = allocateStart + this.methodArgs[i].getSize();
+                    target.method.localVariables.add(new AllocatedLocalVariableNode(allocate, this.methodArgs[i].getDescriptor(),
+                        null, new LabelNode(decorationData.begin), new LabelNode(decorationData.end), allocateStart));
+                    return allocateStart;
+                }
             } else {
-                throw new InvalidInjectionException(this.info, "Cannot find local at " + i + " with ordinal " + localNode.values.get(1) + "\n"
-                    + "Available locals:\n"
-                    + lvns.stream().map(it -> "Index: " + it.index + " Type " + it.desc + " Name " + it.name).collect(Collectors.joining("\n")));
+                throw new InvalidInjectionException(this.info, "Invalid @Local at parameter " + i);
             }
         } else {
             throw new InvalidInjectionException(this.info, "@Local not exist at local " + i + ": " + type);
@@ -524,6 +554,20 @@ public class Decorator extends Injector {
             }
         }
         return 0;
+    }
+
+    private static class AllocatedLocalVariableNode extends LocalVariableNode {
+
+        private final String id;
+
+        public AllocatedLocalVariableNode(String id, String descriptor, String signature, LabelNode start, LabelNode end, int index) {
+            super("decorator_" + id, descriptor, signature, start, end, index);
+            this.id = id;
+        }
+
+        @Override
+        public void accept(MethodVisitor methodVisitor) {
+        }
     }
 
     protected class CollectingVisitor extends MethodVisitor {
