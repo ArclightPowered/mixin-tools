@@ -493,12 +493,17 @@ public class Decorator extends Injector {
                 target.insns.insertBefore(decorationData.nodeEnd, collector.blocks.get(1).instructions); // e
                 target.insns.insert(decorationData.nodeEnd, collector.blocks.get(2).instructions); // f
             }
-            default -> throw new InvalidInjectionException(this.info, "Unknown decoration target: " + decorationData.decorationTarget);
+            default ->
+                throw new InvalidInjectionException(this.info, "Unknown decoration target: " + decorationData.decorationTarget);
         }
-        target.method.tryCatchBlocks.addAll(this.findTryCatchIndex(target.method, collector.blocks.get(0).tryCatchBlocks),
-            collector.blocks.get(0).tryCatchBlocks);
-        target.method.localVariables.addAll(collector.blocks.get(0).localVariables.stream()
-            .filter(it -> it.index >= decorationData.handlerLocalsStart).toList());
+        var tcns = collector.blocks.get(0).tryCatchBlocks;
+        if (tcns != null) {
+            target.method.tryCatchBlocks.addAll(this.findTryCatchIndex(target.method, tcns), tcns);
+        }
+        var lvns = collector.blocks.get(0).localVariables;
+        if (lvns != null) {
+            target.method.localVariables.addAll(lvns.stream().filter(it -> it.index >= decorationData.handlerLocalsStart).toList());
+        }
         target.method.maxLocals = Math.max(target.method.maxLocals,
             this.methodNode.maxLocals - decorationData.handlerLocalsOffset + decorationData.handlerLocalsStart);
         target.method.maxStack = Math.max(target.method.maxStack,
