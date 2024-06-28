@@ -6,31 +6,57 @@ import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
-import org.objectweb.asm.tree.*;
-import org.spongepowered.asm.mixin.injection.InjectionPoint;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.AnnotationNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FrameNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LocalVariableNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
+import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
 import org.spongepowered.asm.mixin.injection.code.Injector;
 import org.spongepowered.asm.mixin.injection.points.MethodHead;
 import org.spongepowered.asm.mixin.injection.struct.InjectionInfo;
 import org.spongepowered.asm.mixin.injection.struct.InjectionNodes.InjectionNode;
 import org.spongepowered.asm.mixin.injection.struct.Target;
+import org.spongepowered.asm.mixin.injection.throwables.InjectionError;
 import org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException;
+import org.spongepowered.asm.mixin.transformer.meta.MixinMerged;
 import org.spongepowered.asm.util.Annotations;
 import org.spongepowered.asm.util.Locals;
 
 import java.lang.invoke.MethodHandle;
-import java.lang.reflect.Modifier;
-import java.util.*;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class Decorator extends Injector {
 
     private static final String DECORATION_LOCALS = "DECORATION_LOCALS";
+    private static final String DECORATION_STRUCTURE = "DECORATION_STRUCTURE";
     private static final Type DECORATION_TYPE = Type.getType(DecorationOps.class);
     private static final Type MH_TYPE = Type.getType(MethodHandle.class);
-    private static final Type DECORATION_METHOD = Type.getMethodType(MH_TYPE);
     private static final String DECORATION_CALLSITE = "callsite";
     private static final String DECORATION_CANCEL = "cancel";
     private static final String DECORATION_BLACKHOLE = "blackhole";
+    private static final String DECORATION_JMP_LOOP_START = "jumpToLoopStart";
+    private static final String DECORATION_JMP_LOOP_END = "jumpToLoopEnd";
+    private static final String DECORATION_JMP_BLOCK_END = "jumpToCodeBlockEnd";
     private static final String MH_INVOKE = "invoke";
     private static final String LOCAL_DESC = Type.getDescriptor(Local.class);
 
@@ -39,7 +65,7 @@ public class Decorator extends Injector {
     }
 
     enum DecorationTarget {
-        INVOKE, FIELD, NEW, RETURN, HEAD
+        INVOKE, FIELD, NEW, RETURN, INJECTION
     }
 
     protected static class DecorationData extends InjectorData {
@@ -51,11 +77,14 @@ public class Decorator extends Injector {
 
         final AbstractInsnNode callsiteDecl, callsiteInvoke;
         final Map<AbstractInsnNode, MethodInsnNode> cancels, blackholes; // decl -> invoke
+        final Set<AbstractInsnNode> jumpToLoopStart, jumpToLoopEnd, jumpToCodeBlockEnd;
 
         final boolean requireFrame;
+        final boolean hasCallsite;
 
         final Label begin = new Label(), end = new Label();
         final LocalVariableNode[] locals;
+        final DecorationCodeStructure codeStructure;
 
         boolean hasEnd = false;
         int handlerLocalsStart, handlerStackStart;
@@ -63,22 +92,33 @@ public class Decorator extends Injector {
         List<Object> targetLocals;
         int[] lvtMap;
 
+        InsnList beforeDecorate, afterDecorate;
+
         DecorationData(Target target, InjectionNode injectionNode, AbstractInsnNode callsiteDecl,
                        AbstractInsnNode callsiteInvoke, Map<AbstractInsnNode, MethodInsnNode> cancels,
-                       Map<AbstractInsnNode, MethodInsnNode> blackholes, boolean requireFrame, LocalVariableNode[] locals) {
+                       Map<AbstractInsnNode, MethodInsnNode> blackholes,
+                       Set<AbstractInsnNode> jumpToLoopStart, Set<AbstractInsnNode> jumpToLoopEnd, Set<AbstractInsnNode> jumpToCodeBlockEnd,
+                       boolean requireFrame, boolean inject,
+                       LocalVariableNode[] locals, DecorationCodeStructure codeStructure) {
             super(target);
             this.node = injectionNode.getCurrentTarget();
             this.callsiteDecl = callsiteDecl;
             this.callsiteInvoke = callsiteInvoke;
             this.cancels = cancels;
             this.blackholes = blackholes;
+            this.jumpToLoopStart = jumpToLoopStart;
+            this.jumpToLoopEnd = jumpToLoopEnd;
+            this.jumpToCodeBlockEnd = jumpToCodeBlockEnd;
             this.requireFrame = requireFrame;
             this.locals = locals;
-            if (injectionNode.getDecoration(DecoratorInfo.DECORATOR_ORIGINAL_INJECTION_POINT) instanceof MethodHead) {
+            this.codeStructure = codeStructure;
+            var hasCallsite = true;
+            if (injectionNode.getDecoration(DecoratorInfo.DECORATOR_ORIGINAL_INJECTION_POINT) instanceof MethodHead || inject) {
                 this.returnType = Type.VOID_TYPE;
                 this.handlerArgs = new Type[]{};
                 this.nodeEnd = this.node;
-                this.decorationTarget = DecorationTarget.HEAD;
+                this.decorationTarget = DecorationTarget.INJECTION;
+                hasCallsite = false;
             } else if (this.node instanceof MethodInsnNode mn) {
                 this.returnType = Type.getReturnType(mn.desc);
                 var targetArgs = Type.getArgumentTypes(mn.desc);
@@ -132,12 +172,82 @@ public class Decorator extends Injector {
             } else {
                 throw new UnsupportedOperationException("Invalid target type " + this.node);
             }
+            this.hasCallsite = hasCallsite;
         }
+    }
+
+    protected static class DecorationCodeStructure {
+        private LabelNode loopStart, loopEnd, codeBlockEnd;
     }
 
     @Override
     protected void preInject(Target target, InjectionNode node) {
         node.decorate(DECORATION_LOCALS, Locals.getLocalsAt(target.classNode, target.method, node.getCurrentTarget(), Locals.Settings.DEFAULT));
+        node.decorate(DECORATION_STRUCTURE, createStructure(target, node));
+    }
+
+    private DecorationCodeStructure createStructure(Target target, InjectionNode node) {
+        var structure = new DecorationCodeStructure();
+        var myIndex = target.method.instructions.indexOf(node.getCurrentTarget());
+        var possibleLoopStarts = new ArrayList<LabelNode>();
+        var nextReachable = new LinkedList<Map.Entry<AbstractInsnNode, Integer>>();
+        nextReachable.add(Map.entry(node.getCurrentTarget(), -1));
+        while (!nextReachable.isEmpty()) {
+            var entry = nextReachable.removeFirst();
+            var first = entry.getKey();
+            var limit = entry.getValue();
+            for (var iterator = target.method.instructions.iterator(target.method.instructions.indexOf(first));
+                 iterator.hasNext() && (limit < 0 || iterator.nextIndex() < limit); ) {
+                var insn = iterator.next();
+                if (insn instanceof JumpInsnNode jump) {
+                    if (target.method.instructions.indexOf(jump.label) < myIndex) {
+                        possibleLoopStarts.add(jump.label);
+                    } else if (target.method.instructions.indexOf(jump.label) > iterator.previousIndex()) {
+                        if (jump.getOpcode() == Opcodes.GOTO) {
+                            nextReachable.add(Map.entry(jump.label, limit));
+                            break;
+                        } else {
+                            if (target.method.instructions.indexOf(jump.label) > iterator.previousIndex()) {
+                                nextReachable.add(Map.entry(jump.label, limit));
+                                limit = target.method.instructions.indexOf(jump.label);
+                            }
+                        }
+                    }
+                }
+                if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN || insn.getOpcode() == Opcodes.ATHROW) {
+                    break;
+                }
+            }
+        }
+        structure.loopStart = possibleLoopStarts.stream().max(Comparator.comparing(target.method.instructions::indexOf)).orElse(null);
+        if (structure.loopStart != null) {
+            var loopStartIndex = target.method.instructions.indexOf(structure.loopStart);
+            for (var iterator = target.method.instructions.iterator(loopStartIndex); iterator.hasNext(); ) {
+                var insn = iterator.next();
+                if (insn == node.getCurrentTarget()) {
+                    // do while loop?
+                    break;
+                }
+                if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN || insn.getOpcode() == Opcodes.ATHROW) {
+                    break;
+                }
+                if (insn instanceof JumpInsnNode jump && target.method.instructions.indexOf(jump.label) > myIndex) {
+                    structure.loopEnd = jump.label;
+                    break;
+                }
+            }
+        }
+        for (var iterator = target.method.instructions.iterator(myIndex); iterator.hasPrevious(); ) {
+            var insn = iterator.previous();
+            if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN || insn.getOpcode() == Opcodes.ATHROW) {
+                break;
+            }
+            if (insn instanceof JumpInsnNode jump && target.method.instructions.indexOf(jump.label) > myIndex) {
+                structure.codeBlockEnd = jump.label;
+                break;
+            }
+        }
+        return structure;
     }
 
     @Override
@@ -146,7 +256,7 @@ public class Decorator extends Injector {
             throw new UnsupportedOperationException("Indirect target failure for " + this.info);
         }
         this.methodNode.instructions.resetLabels();
-        this.checkTargetForNode(target, node, InjectionPoint.RestrictTargetLevel.ALLOW_ALL);
+        this.checkTargetModifiers(target, false);
         var decorationData = createDecorationData(target, node);
         this.guardInline(target, node, decorationData, decorationData.handlerArgs);
         decorationData.lvtMap = this.prepareLvtMapping(target, decorationData, node.getDecoration(DECORATION_LOCALS));
@@ -155,18 +265,19 @@ public class Decorator extends Injector {
     }
 
     protected DecorationData createDecorationData(Target target, InjectionNode node) {
-        AbstractInsnNode callsiteDecl = null, callsiteInvoke = null;
+        AbstractInsnNode callsiteDecl = null;
+        MethodInsnNode callsiteInvoke = null;
         Map<AbstractInsnNode, MethodInsnNode> cancels = new HashMap<>(), blackholes = new HashMap<>();
+        Set<AbstractInsnNode> jumpToLoopStart = new HashSet<>(), jumpToLoopEnd = new HashSet<>(), jumpToCodeBlockEnd = new HashSet<>();
         enum LastDecl {
-            CALLSITE, CANCEL, BLACKHOLE
+            CALLSITE, CANCEL, BLACKHOLE, JUMP
         }
         LastDecl lastDecl = null;
         AbstractInsnNode lastDeclInsn = null;
         boolean requireFrame = false;
         for (var insn : this.methodNode.instructions) {
             if (insn.getOpcode() == Opcodes.INVOKESTATIC && insn instanceof MethodInsnNode mn) {
-                if (mn.owner.equals(DECORATION_TYPE.getInternalName())
-                    && mn.desc.equals(DECORATION_METHOD.getDescriptor())) {
+                if (mn.owner.equals(DECORATION_TYPE.getInternalName())) {
                     if (lastDecl != null) {
                         throw new InvalidInjectionException(this.info, "Nested DecorationOps at bci "
                             + this.methodNode.instructions.indexOf(lastDeclInsn) + ", "
@@ -186,6 +297,18 @@ public class Decorator extends Injector {
                         }
                         case DECORATION_CANCEL -> lastDecl = LastDecl.CANCEL;
                         case DECORATION_BLACKHOLE -> lastDecl = LastDecl.BLACKHOLE;
+                        case DECORATION_JMP_LOOP_START -> {
+                            jumpToLoopStart.add(mn);
+                            lastDecl = LastDecl.JUMP;
+                        }
+                        case DECORATION_JMP_LOOP_END -> {
+                            jumpToLoopEnd.add(mn);
+                            lastDecl = LastDecl.JUMP;
+                        }
+                        case DECORATION_JMP_BLOCK_END -> {
+                            jumpToCodeBlockEnd.add(mn);
+                            lastDecl = LastDecl.JUMP;
+                        }
                     }
                 }
             } else if (insn.getOpcode() == Opcodes.INVOKEVIRTUAL && insn instanceof MethodInsnNode mn) {
@@ -205,10 +328,20 @@ public class Decorator extends Injector {
             } else if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN
                 && insn.getNext() != null) {
                 requireFrame = true;
+            } else if (lastDecl == LastDecl.JUMP) {
+                if (insn.getOpcode() != Opcodes.ATHROW) {
+                    throw new InvalidInjectionException(this.info, "DecorationOps#jump not followed by throw");
+                } else {
+                    lastDecl = null;
+                    lastDeclInsn = null;
+                }
             }
         }
-        if (callsiteDecl == null || callsiteInvoke == null) {
+        var inject = Annotations.<Boolean>getValue(this.info.getAnnotationNode(), "inject") == Boolean.TRUE;
+        if (!inject && (callsiteDecl == null || callsiteInvoke == null)) {
             throw new InvalidInjectionException(this.info, "No callsite found in @Decorate");
+        } else if (inject && (callsiteDecl != null || callsiteInvoke != null)) {
+            throw new InvalidInjectionException(this.info, "Found callsite in @Decorate(inject=true)");
         }
         if (lastDeclInsn != null) {
             throw new InvalidInjectionException(this.info,
@@ -220,8 +353,9 @@ public class Decorator extends Injector {
             if ((target.returnType.equals(Type.VOID_TYPE) && argumentTypes.length != 0) ||
                 (!target.returnType.equals(Type.VOID_TYPE) && (argumentTypes.length != 1 || !argumentTypes[0].equals(target.returnType)))) {
                 throw new InvalidInjectionException(this.info,
-                    "Invalid DecorationOps.cancel argument types: bci "
-                        + this.methodNode.instructions.indexOf(invoke));
+                    "Invalid DecorationOps.cancel argument types at bci "
+                        + this.methodNode.instructions.indexOf(invoke) + ": expect " + target.returnType.getDescriptor()
+                        + ", found " + (argumentTypes.length > 0 ? argumentTypes[0].getDescriptor() : "nothing"));
             }
         }
         for (var invoke : blackholes.values()) {
@@ -232,11 +366,32 @@ public class Decorator extends Injector {
                         + this.methodNode.instructions.indexOf(invoke));
             }
         }
-        var data = new DecorationData(target, node, callsiteDecl, callsiteInvoke, cancels,
-            blackholes, requireFrame, node.getDecoration(DECORATION_LOCALS));
+        var codeStructure = node.<DecorationCodeStructure>getDecoration(DECORATION_STRUCTURE);
+        if (!jumpToLoopStart.isEmpty() && codeStructure.loopStart == null) {
+            throw new InvalidInjectionException(this.info, "Failed to locate loopStart");
+        }
+        if (!jumpToLoopEnd.isEmpty() && codeStructure.loopEnd == null) {
+            throw new InvalidInjectionException(this.info, "Failed to locate loopEnd");
+        }
+        if (!jumpToCodeBlockEnd.isEmpty() && codeStructure.codeBlockEnd == null) {
+            throw new InvalidInjectionException(this.info, "Failed to locate codeBlockEnd");
+        }
+        var data = new DecorationData(target, node, callsiteDecl, callsiteInvoke, cancels, blackholes,
+            jumpToLoopStart, jumpToLoopEnd, jumpToCodeBlockEnd,
+            requireFrame, inject, node.getDecoration(DECORATION_LOCALS), codeStructure);
         if (!data.returnType.equals(Type.getReturnType(this.methodNode.desc))) {
             throw new InvalidInjectionException(this.info, "Return type mismatch: expect " + data.returnType
                 + ", found " + Type.getReturnType(this.methodNode.desc));
+        }
+        if (callsiteInvoke != null) {
+            var methodType = Type.getMethodType(callsiteInvoke.desc);
+            if (!Arrays.equals(methodType.getArgumentTypes(), data.handlerArgs)) {
+                throw new InvalidInjectionException(this.info, "DecorationOps.callsite method type and target method type mismatch");
+            }
+            var returnType = Type.getReturnType(callsiteInvoke.desc);
+            if (!data.returnType.equals(returnType)) {
+                throw new InvalidInjectionException(this.info, "DecorationOps.callsite return type and target return type mismatch");
+            }
         }
         var argTypes = Type.getArgumentTypes(this.methodNode.desc);
         var handlerArgs = data.handlerArgs;
@@ -250,35 +405,77 @@ public class Decorator extends Injector {
         return data;
     }
 
-    private void guardInline(Target target, InjectionNode node, DecorationData decorationData,
-                             Type[] handlerTypes) {
+    private EnhancedAnalyzerAdapter localsAndStackAt(Target target, InjectionNode node, AbstractInsnNode label) {
         var adapter = new EnhancedAnalyzerAdapter(target.classNode.name, target.method.access, target.method.name,
             target.method.desc, null);
-        for (int i = target.insns.indexOf(node.getCurrentTarget()), j = 0; j < i; j++) {
-            target.insns.get(j).accept(adapter);
+        var endInsn = label == null ? node.getCurrentTarget() : label;
+        for (int i = target.insns.indexOf(endInsn), j = 0; j < i; j++) {
+            var insnNode = target.insns.get(j);
+            insnNode.accept(adapter);
+            if (label != null && insnNode instanceof JumpInsnNode jump && jump.label == label) {
+                endInsn = insnNode;
+                break;
+            }
         }
+        // other transformers inserted control flow end
+        if (adapter.locals == null) {
+            LabelNode lastEnter = null;
+            for (int i = target.insns.indexOf(endInsn), j = i - 1; j >= 0; j--) {
+                var insn = target.insns.get(j);
+                if (insn instanceof LabelNode) {
+                    if (lastEnter == null) {
+                        lastEnter = (LabelNode) insn;
+                    } else {
+                        throw new InvalidInjectionException(this.info, "Multiple enter labels");
+                    }
+                } else if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN || insn.getOpcode() == Opcodes.ATHROW || insn.getOpcode() == Opcodes.GOTO) {
+                    if (lastEnter != null) {
+                        break;
+                    } else {
+                        throw new InvalidInjectionException(this.info, "Injected into dead code");
+                    }
+                }
+            }
+            if (lastEnter == null) {
+                throw new InvalidInjectionException(this.info, "Injected into dead code?");
+            }
+            return localsAndStackAt(target, node, lastEnter);
+        } else {
+            return adapter;
+        }
+    }
+
+    private void guardInline(Target target, InjectionNode node, DecorationData decorationData,
+                             Type[] handlerTypes) {
+        var adapter = localsAndStackAt(target, node, null);
         var currentLocal = adapter.getCurrent(adapter.locals);
         var currentStack = adapter.getCurrent(adapter.stack);
         decorationData.targetLocals = currentLocal;
+        if (decorationData.decorationTarget == DecorationTarget.NEW) {
+            currentStack = new ArrayList<>(currentStack);
+            currentStack.addAll(Arrays.stream(handlerTypes).map(EnhancedAnalyzerAdapter::getFrameItem).toList());
+        }
         if (currentStack.size() < handlerTypes.length) {
             throw new InvalidInjectionException(this.info, "Stack size is not large enough");
         }
         for (int i = 0; i < handlerTypes.length; i++) {
             var handlerType = handlerTypes[i];
-            if (!EnhancedAnalyzerAdapter.canFit(currentStack.get(currentStack.size() - handlerTypes.length + i),
-                handlerType)) {
+            if (!EnhancedAnalyzerAdapter.canFit(currentStack.get(currentStack.size() - handlerTypes.length + i), handlerType)) {
                 throw new InvalidInjectionException(this.info, "Stack element not match argument type: frame "
-                    + currentStack.get(i) + ", argument " + handlerType);
+                    + currentStack.get(currentStack.size() - handlerTypes.length + i) + ", argument " + handlerType);
             }
         }
 
         var beforeDecorate = new InsnList();
         var afterDecorate = new InsnList();
+        decorationData.beforeDecorate = beforeDecorate;
+        decorationData.afterDecorate = afterDecorate;
 
         // 1. store handler args
         int unusedStackElmSize = currentStack.subList(handlerTypes.length, currentStack.size()).stream()
             .mapToInt(it -> (it == Opcodes.LONG || it == Opcodes.DOUBLE) ? 2 : 1).sum();
-        int handlerStartIndex = adapter.locals.size() + unusedStackElmSize;
+        int handlersLocalBase = Math.max(adapter.locals.size(), target.method.maxLocals);
+        int handlerStartIndex = handlersLocalBase + unusedStackElmSize;
         decorationData.handlerLocalsStart = handlerStartIndex;
         decorationData.handlerStackStart = adapter.stack.size();
         for (int i = 0, lvIndex = handlerStartIndex; i < handlerTypes.length; i++) {
@@ -286,18 +483,18 @@ public class Decorator extends Injector {
             lvIndex += handlerTypes[i].getSize();
         }
         // 2. store unused stack elements, likely 0
-        for (int i = currentStack.size() - handlerTypes.length - 1, lvIndex = adapter.locals.size(); i >= 0; i--) {
+        for (int i = currentStack.size() - handlerTypes.length - 1, lvIndex = handlersLocalBase; i >= 0; i--) {
             beforeDecorate.add(
                 new VarInsnNode(EnhancedAnalyzerAdapter.getOpcode(Opcodes.ISTORE, currentStack.get(i)), lvIndex));
             afterDecorate.insert(
                 new VarInsnNode(EnhancedAnalyzerAdapter.getOpcode(Opcodes.ILOAD, currentStack.get(i)), lvIndex));
             lvIndex += (currentStack.get(i) == Opcodes.LONG || currentStack.get(i) == Opcodes.DOUBLE) ? 2 : 1;
         }
-        if (!decorationData.requireFrame && afterDecorate.size() == 0) {
-            target.insertBefore(node.getCurrentTarget(), beforeDecorate);
+        if (!decorationData.requireFrame && (afterDecorate.size() == 0 || !decorationData.hasCallsite)) {
             return;
         }
         // 3. insert additional frame node at begin
+        decorationData.hasEnd = true;
         var callbackArgs = Type.getArgumentTypes(this.methodNode.desc);
         var callbackLocals = Arrays.stream(decorationData.handlerArgs).map(EnhancedAnalyzerAdapter::getFrameItem).toArray();
         var mergedLocals = new Object[currentLocal.size() + currentStack.size() + callbackArgs.length];
@@ -319,36 +516,44 @@ public class Decorator extends Injector {
                 break;
             }
         }
-        List<Object> afterLocal = adapter.getCurrent(adapter.locals),
-            afterStack = adapter.getCurrent(adapter.stack);
-        if (afterDecorate.size() > 0) {
-            var callbackHasReturn = Type.getReturnType(this.methodNode.desc).getSize() > 0;
-            var afterWithUnused = new Object[afterLocal.size() + currentLocal.size() - handlerTypes.length
-                + (callbackHasReturn ? 1 : 0)];
-            System.arraycopy(afterLocal.toArray(), 0, afterWithUnused, 0, afterLocal.size());
-            System.arraycopy(currentStack.toArray(), 0, afterWithUnused, afterLocal.size(),
-                currentLocal.size() - handlerTypes.length);
-            if (callbackHasReturn) {
-                afterWithUnused[afterWithUnused.length - 1] = EnhancedAnalyzerAdapter
-                    .getFrameItem(Type.getReturnType(this.methodNode.desc));
-                afterDecorate.insert(new VarInsnNode(Type.getReturnType(this.methodNode.desc).getOpcode(Opcodes.ISTORE), handlerStartIndex));
+        if (decorationData.hasCallsite) {
+            if (adapter.locals != null && adapter.stack != null) {
+                List<Object> afterLocal = adapter.getCurrent(adapter.locals),
+                    afterStack = adapter.getCurrent(adapter.stack);
+                if (afterDecorate.size() > 0) {
+                    var callbackHasReturn = Type.getReturnType(this.methodNode.desc).getSize() > 0;
+                    var afterWithUnused = new Object[afterLocal.size() + currentStack.size() - handlerTypes.length
+                        + (callbackHasReturn ? 1 : 0)];
+                    System.arraycopy(afterLocal.toArray(), 0, afterWithUnused, 0, afterLocal.size());
+                    System.arraycopy(currentStack.toArray(), 0, afterWithUnused, afterLocal.size(),
+                        currentStack.size() - handlerTypes.length);
+                    if (callbackHasReturn) {
+                        afterWithUnused[afterWithUnused.length - 1] = EnhancedAnalyzerAdapter
+                            .getFrameItem(Type.getReturnType(this.methodNode.desc));
+                        afterDecorate.insert(new VarInsnNode(Type.getReturnType(this.methodNode.desc).getOpcode(Opcodes.ISTORE), handlerStartIndex));
+                    }
+                    afterDecorate.insert(new FrameNode(Opcodes.F_FULL, afterWithUnused.length, afterWithUnused,
+                        callbackHasReturn ? 1 : 0,
+                        callbackHasReturn ? new Object[]{afterWithUnused[afterWithUnused.length - 1]} : null));
+                    // rebuild stack end
+                    if (callbackHasReturn) {
+                        afterDecorate.add(new VarInsnNode(Type.getReturnType(this.methodNode.desc).getOpcode(Opcodes.ILOAD),
+                            handlerStartIndex));
+                    }
+                }
+                // 5. insert additional frame node at end
+                afterDecorate.add(new FrameNode(Opcodes.F_FULL, afterLocal.size(), afterLocal.toArray(),
+                    afterStack.size(), afterStack.toArray()));
             }
-            afterDecorate.insert(new FrameNode(Opcodes.F_FULL, afterWithUnused.length, afterWithUnused,
-                callbackHasReturn ? 1 : 0,
-                callbackHasReturn ? new Object[]{afterWithUnused[afterWithUnused.length - 1]} : null));
-            // rebuild stack end
-            if (callbackHasReturn) {
-                afterDecorate.add(new VarInsnNode(Type.getReturnType(this.methodNode.desc).getOpcode(Opcodes.ILOAD),
-                    handlerStartIndex));
-            }
+        } else {
+            afterDecorate.add(new FrameNode(Opcodes.F_FULL, currentLocal.size(), currentLocal.toArray(),
+                currentStack.size(), currentStack.toArray()));
         }
-        // 5. insert additional frame node at end
-        decorationData.hasEnd = true;
-        afterDecorate.add(new FrameNode(Opcodes.F_FULL, afterLocal.size(), afterLocal.toArray(),
-            afterStack.size(), afterStack.toArray()));
         // 6. rewrite next frame node if it's not a full frame
-        for (var iterator = target.insns
-            .iterator(target.insns.indexOf(decorationData.nodeEnd) + 1); iterator.hasNext(); ) {
+        for (var iterator = target.insns.iterator(target.insns.indexOf(decorationData.nodeEnd) + 1); iterator.hasNext(); ) {
+            if (adapter.locals == null || adapter.stack == null) {
+                break;
+            }
             var insn = iterator.next();
             insn.accept(adapter);
             if (insn instanceof FrameNode fn) {
@@ -361,8 +566,6 @@ public class Decorator extends Injector {
                 break;
             }
         }
-        target.insns.insertBefore(node.getCurrentTarget(), beforeDecorate);
-        target.insns.insert(decorationData.nodeEnd, afterDecorate);
     }
 
     private int[] prepareLvtMapping(Target target, DecorationData decorationData, LocalVariableNode[] lvns) {
@@ -370,9 +573,11 @@ public class Decorator extends Injector {
         Arrays.fill(lvtMap, -1);
         var lvIndex = 0;
         var offset = 0;
-        if (!Modifier.isStatic(this.methodNode.access)) {
-            lvtMap[lvIndex] = offset;
-            lvIndex++;
+        if (!target.isStatic) {
+            if (!this.isStatic) {
+                lvtMap[lvIndex] = offset;
+                lvIndex++;
+            }
             offset++;
         }
         var targetArgsStart = decorationData.handlerArgs.length;
@@ -380,8 +585,22 @@ public class Decorator extends Injector {
             lvtMap[lvIndex] = lvIndex - offset + decorationData.handlerLocalsStart;
             lvIndex += this.methodArgs[i].getSize();
         }
-        var localsStart = targetArgsStart + target.arguments.length;
+        var localsStart = targetArgsStart;
+        for (int i = localsStart; i < targetArgsStart + target.arguments.length; i++) {
+            if (this.methodNode.invisibleAnnotableParameterCount > i &&
+                this.methodNode.invisibleParameterAnnotations[i] != null &&
+                this.methodNode.invisibleParameterAnnotations[i].stream()
+                    .filter(it -> it.desc.equals(LOCAL_DESC)).findAny().orElse(null) != null) {
+                break;
+            }
+            localsStart++;
+        }
         for (int i = targetArgsStart; i < Math.min(this.methodArgs.length, localsStart); i++) {
+            if (!this.methodArgs[i].equals(target.arguments[i - targetArgsStart])) {
+                throw new InvalidInjectionException(this.info, "Method argument not match target arguments. " +
+                    "Expect " + target.arguments[i - targetArgsStart].getClassName() + ", " +
+                    "found" + this.methodArgs[i].getClassName() + " " + this.methodNode.parameters.get(i).name);
+            }
             lvtMap[lvIndex] = offset;
             lvIndex += this.methodArgs[i].getSize();
             offset += this.methodArgs[i].getSize();
@@ -400,13 +619,42 @@ public class Decorator extends Injector {
             lvtMap[lvIndex] = lvIndex - offset + decorationData.handlerLocalsStart;
             lvIndex++;
         }
+        this.checkDuplicate(lvtMap);
         return lvtMap;
+    }
+
+    private void checkDuplicate(int[] lvtMap) {
+        var map = new HashMap<Integer, List<AbstractMap.SimpleImmutableEntry<Integer, Integer>>>();
+        for (int i = (this.isStatic ? 0 : 1); i < lvtMap.length; i++) {
+            if (lvtMap[i] != -1) {
+                var entry = new AbstractMap.SimpleImmutableEntry<>(i, lvtMap[i]);
+                map.computeIfAbsent(entry.getValue(), k -> new ArrayList<>()).add(entry);
+            }
+        }
+        for (var it : map.entrySet()) {
+            if (it.getValue().size() > 1) {
+                var args = it.getValue().stream().map(p -> {
+                        if (p.getKey() < this.methodArgs.length) {
+                            var argIndex = p.getKey() - (this.isStatic ? 0 : 1);
+                            return "arg " + p.getKey() + ": " + this.methodArgs[argIndex].getClassName() + " " + this.methodNode.parameters.get(argIndex).name;
+                        } else {
+                            var lvNode = this.methodNode.localVariables.stream().filter(lv -> lv.index == p.getKey()).findAny();
+                            return "lvt " + p.getKey() + ": " + lvNode.map(lv -> Type.getType(lv.desc).getClassName()).orElse("unknown")
+                                + " " + lvNode.map(lv -> lv.name).orElse("unknown");
+                        }
+                    })
+                    .collect(Collectors.joining("\n\t"));
+                logger.warn("Decorator " + this.info.getMixin().getClassName() + "#" + this.info.getMethodName()
+                    + " locals\n\t" + args + "\nare mapped to same local index " + it.getKey());
+            }
+        }
     }
 
     private int findLv(Target target, DecorationData decorationData, int i, LocalVariableNode[] locals) {
         var type = this.methodArgs[i];
         AnnotationNode localNode;
         if (this.methodNode.invisibleAnnotableParameterCount > i &&
+            this.methodNode.invisibleParameterAnnotations[i] != null &&
             (localNode = this.methodNode.invisibleParameterAnnotations[i].stream()
                 .filter(it -> it.desc.equals(LOCAL_DESC)).findAny().orElse(null)) != null) {
             var index = Annotations.<Integer>getValue(localNode, "ordinal");
@@ -415,14 +663,15 @@ public class Decorator extends Injector {
                 throw new InvalidInjectionException(this.info, "Only one of 'ordinal' and 'allocate' can exist on @Local at parameter " + i);
             }
             if (index != null) {
-                var lvns = Arrays.stream(locals).filter(it -> Type.getType(it.desc).equals(type)).toList();
+                var lvns = Arrays.stream(locals).filter(it -> it != null && Type.getType(it.desc).equals(type)).toList();
                 if (index < 0) {
                     index = lvns.size() + index;
                 }
-                if (index < lvns.size()) {
+                if (index >= 0 && index < lvns.size()) {
                     return lvns.get(index).index;
                 } else {
-                    throw new InvalidInjectionException(this.info, "Cannot find local at " + i + " with ordinal " + localNode.values.get(1) + "\n"
+                    throw new InvalidInjectionException(this.info, "Cannot find @Local(ordinal=" + Annotations.<Integer>getValue(localNode, "ordinal") + ") "
+                        + type.getClassName() + " " + this.methodNode.parameters.get(i).name + " at " + i + "\n"
                         + "Available locals:\n"
                         + lvns.stream().map(it -> "Index: " + it.index + " Type " + it.desc + " Name " + it.name).collect(Collectors.joining("\n")));
                 }
@@ -430,15 +679,15 @@ public class Decorator extends Injector {
                 var allocated = target.method.localVariables.stream().filter(it -> it instanceof AllocatedLocalVariableNode al && al.id.equals(allocate)).findFirst();
                 if (allocated.isPresent()) {
                     if (!allocated.get().desc.equals(this.methodArgs[i].getDescriptor())) {
-                        throw new InvalidInjectionException(this.info, "@Local allocate has different desc "
+                        throw new InvalidInjectionException(this.info, "@Local(allocate=\"" + allocate + "\") has different desc "
                             + this.methodArgs[i].getDescriptor() + " and " + allocated.get().desc);
                     }
                     return allocated.get().index;
                 } else {
                     var allocateStart = Math.max(target.method.maxLocals,
                         this.methodNode.maxLocals - decorationData.handlerLocalsOffset + decorationData.handlerLocalsStart);
-                    target.method.maxLocals = allocateStart + this.methodArgs[i].getSize();
-                    target.method.localVariables.add(new AllocatedLocalVariableNode(allocate, this.methodArgs[i].getDescriptor(),
+                    target.method.maxLocals = allocateStart + type.getSize();
+                    target.method.localVariables.add(new AllocatedLocalVariableNode(allocate, type.getDescriptor(),
                         null, new LabelNode(decorationData.begin), new LabelNode(decorationData.end), allocateStart));
                     return allocateStart;
                 }
@@ -459,7 +708,7 @@ public class Decorator extends Injector {
             tryCatch.accept(collector);
         }
         switch (decorationData.decorationTarget) {
-            case INVOKE, FIELD, HEAD, RETURN -> {
+            case INVOKE, FIELD, RETURN -> {
                 for (var insn : this.methodNode.instructions) {
                     if (insn == decorationData.callsiteDecl) {
                         continue;
@@ -471,7 +720,9 @@ public class Decorator extends Injector {
                     }
                 }
                 collector.visitEnd();
+                target.insns.insertBefore(node.getCurrentTarget(), decorationData.beforeDecorate);
                 target.insns.insertBefore(node.getCurrentTarget(), collector.blocks.get(0).instructions);
+                target.insns.insert(decorationData.nodeEnd, decorationData.afterDecorate);
                 target.insns.insert(decorationData.nodeEnd, collector.blocks.get(1).instructions);
             }
             case NEW -> {
@@ -495,8 +746,8 @@ public class Decorator extends Injector {
                     if (insn == decorationData.nodeEnd) {
                         break;
                     }
-                    initInsns.add(insn);
                     iterator.remove();
+                    initInsns.add(insn);
                 }
                 // @formatter:off
                 // original:                                      | callback:                                   
@@ -519,9 +770,20 @@ public class Decorator extends Injector {
                 //   c     
                 // @formatter:on                                                                                         
                 target.insns.insertBefore(decorationData.node, initInsns); // reorder b
+                target.insns.insertBefore(decorationData.node, decorationData.beforeDecorate);
                 target.insns.insertBefore(decorationData.node, collector.blocks.get(0).instructions); // d
                 target.insns.insertBefore(decorationData.nodeEnd, collector.blocks.get(1).instructions); // e
+                target.insns.insert(decorationData.nodeEnd, decorationData.afterDecorate);
                 target.insns.insert(decorationData.nodeEnd, collector.blocks.get(2).instructions); // f
+            }
+            case INJECTION -> {
+                for (var insn : this.methodNode.instructions) {
+                    collector.next(insn);
+                }
+                collector.visitEnd();
+                target.insns.insertBefore(node.getCurrentTarget(), decorationData.beforeDecorate);
+                target.insns.insertBefore(node.getCurrentTarget(), collector.blocks.get(0).instructions);
+                target.insns.insertBefore(node.getCurrentTarget(), decorationData.afterDecorate);
             }
             default ->
                 throw new InvalidInjectionException(this.info, "Unknown decoration target: " + decorationData.decorationTarget);
@@ -586,9 +848,27 @@ public class Decorator extends Injector {
 
         private AbstractInsnNode pendingCancel, pendingBlackhole;
         private boolean cancelReturn = false;
+        private boolean jumpThrow = false;
 
         void next(AbstractInsnNode insn) {
-            if (pendingCancel == insn) {
+            if (jumpThrow) {
+                jumpThrow = false;
+            } else if (decorationData.codeStructure.loopStart != null && decorationData.jumpToLoopStart.contains(insn)) {
+                jumpThrow = true;
+                decorationData.codeStructure.loopStart.getLabel().info = decorationData.codeStructure.loopStart;
+                super.visitJumpInsn(Opcodes.GOTO, decorationData.codeStructure.loopStart.getLabel());
+                decorationData.codeStructure.loopStart.getLabel().info = null;
+            } else if (decorationData.codeStructure.loopEnd != null && decorationData.jumpToLoopEnd.contains(insn)) {
+                jumpThrow = true;
+                decorationData.codeStructure.loopEnd.getLabel().info = decorationData.codeStructure.loopEnd;
+                super.visitJumpInsn(Opcodes.GOTO, decorationData.codeStructure.loopEnd.getLabel());
+                decorationData.codeStructure.loopEnd.getLabel().info = null;
+            } else if (decorationData.codeStructure.codeBlockEnd != null && decorationData.jumpToCodeBlockEnd.contains(insn)) {
+                jumpThrow = true;
+                decorationData.codeStructure.codeBlockEnd.getLabel().info = decorationData.codeStructure.codeBlockEnd;
+                super.visitJumpInsn(Opcodes.GOTO, decorationData.codeStructure.codeBlockEnd.getLabel());
+                decorationData.codeStructure.codeBlockEnd.getLabel().info = null;
+            } else if (pendingCancel == insn) {
                 super.visitInsn(target.returnType.getOpcode(Opcodes.IRETURN));
                 pendingCancel = null;
                 cancelReturn = true;
@@ -603,6 +883,8 @@ public class Decorator extends Injector {
                     } else if (cancelReturn) {
                         if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN) {
                             cancelReturn = false;
+                        } else if (insn.getOpcode() >= 0 && insn.getOpcode() != Opcodes.CHECKCAST) {
+                            throw new InvalidInjectionException(info.getMixin(), "No corresponding return after cancel()");
                         }
                     } else {
                         insn.accept(this);
@@ -655,10 +937,6 @@ public class Decorator extends Injector {
         }
 
         @Override
-        public void visitLineNumber(int line, Label start) {
-        }
-
-        @Override
         public void visitInsn(int opcode) {
             if (opcode == decorationData.returnType.getOpcode(Opcodes.IRETURN)) {
                 if (decorationData.hasEnd) {
@@ -675,6 +953,21 @@ public class Decorator extends Injector {
                 super.visitLabel(decorationData.end);
             }
             super.visitEnd();
+        }
+    }
+
+    private static final String MERGED_DESC = Type.getDescriptor(MixinMerged.class);
+
+    public static void postMixin(ClassNode classNode) {
+        for (MethodNode method : classNode.methods) {
+            if (method.invisibleAnnotations != null && method.name.contains("$") && !method.name.startsWith("decorate$")
+                && method.invisibleAnnotations.stream().anyMatch(it -> it.desc.equals(MERGED_DESC))) {
+                for (AbstractInsnNode node : method.instructions) {
+                    if (node instanceof MethodInsnNode mn && mn.owner.equals(DECORATION_TYPE.getInternalName())) {
+                        throw new InjectionError("Non decoration injector " + classNode.name + " " + method.name + " has DecorationOps#" + mn.name);
+                    }
+                }
+            }
         }
     }
 }

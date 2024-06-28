@@ -42,7 +42,7 @@ public class EnhancedAnalyzerAdapter extends AnalyzerAdapter {
             }
             case Opcodes.F_SAME -> super.visitFrame(Opcodes.F_NEW, lastLocal.size(), lastLocal.toArray(), 0, null);
             case Opcodes.F_SAME1 ->
-                    super.visitFrame(Opcodes.F_NEW, lastLocal.size(), lastLocal.toArray(), numStack, stack);
+                super.visitFrame(Opcodes.F_NEW, lastLocal.size(), lastLocal.toArray(), numStack, stack);
         }
         this.recordLocalsStack();
     }
@@ -94,7 +94,8 @@ public class EnhancedAnalyzerAdapter extends AnalyzerAdapter {
         if (frameObject.equals(Opcodes.TOP)) {
             return false;
         } else if (frameObject.equals(Opcodes.INTEGER)) {
-            return type.equals(Type.INT_TYPE);
+            return type.equals(Type.INT_TYPE) || type.equals(Type.SHORT_TYPE)
+                || type.equals(Type.CHAR_TYPE) || type.equals(Type.BYTE_TYPE) || type.equals(Type.BOOLEAN_TYPE);
         } else if (frameObject.equals(Opcodes.FLOAT)) {
             return type.equals(Type.FLOAT_TYPE);
         } else if (frameObject.equals(Opcodes.DOUBLE)) {

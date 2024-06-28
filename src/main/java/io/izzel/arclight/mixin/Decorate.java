@@ -30,4 +30,6 @@ public @interface Decorate {
     int allow() default -1;
 
     String constraints() default "";
+
+    boolean inject() default false;
 }

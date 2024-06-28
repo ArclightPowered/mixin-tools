@@ -37,4 +37,16 @@ public interface DecorationOps {
     static MethodHandle blackhole() {
         throw new IllegalStateException("Not implemented.");
     }
+
+    static Throwable jumpToLoopStart() {
+        return new Throwable("Not implemented.");
+    }
+
+    static Throwable jumpToLoopEnd() {
+        return new Throwable("Not implemented.");
+    }
+
+    static Throwable jumpToCodeBlockEnd() {
+        return new Throwable("Not implemented.");
+    }
 }
