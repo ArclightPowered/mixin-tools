@@ -21,7 +21,9 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.spongepowered.asm.mixin.injection.InjectionPoint;
 import org.spongepowered.asm.mixin.injection.code.Injector;
+import org.spongepowered.asm.mixin.injection.code.InjectorTarget;
 import org.spongepowered.asm.mixin.injection.points.MethodHead;
 import org.spongepowered.asm.mixin.injection.struct.InjectionInfo;
 import org.spongepowered.asm.mixin.injection.struct.InjectionNodes.InjectionNode;
@@ -33,16 +35,7 @@ import org.spongepowered.asm.util.Annotations;
 import org.spongepowered.asm.util.Locals;
 
 import java.lang.invoke.MethodHandle;
-import java.util.AbstractMap;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class Decorator extends Injector {
@@ -178,6 +171,20 @@ public class Decorator extends Injector {
 
     protected static class DecorationCodeStructure {
         private LabelNode loopStart, loopEnd, codeBlockEnd;
+    }
+
+    // Mixin 0.8.5
+    @Override
+    protected boolean findTargetNodes(MethodNode into, InjectionPoint point, InjectorTarget target, Collection<AbstractInsnNode> nodes) {
+        return target.getTarget().isStatic == isStatic && point.find(into.desc, target.getSlice(point), nodes);
+    }
+
+
+    // Mixin 0.8.7
+    // Don't use getDesc() as it is not present in 0.8.5
+    @SuppressWarnings("unused")
+    protected boolean findTargetNodes(InjectorTarget target, InjectionPoint injectionPoint, Collection<AbstractInsnNode> nodes) {
+        return target.getTarget().isStatic == isStatic && injectionPoint.find(target.getTarget().method.desc, target.getSlice(injectionPoint), nodes);
     }
 
     @Override
