@@ -24,6 +24,23 @@ public interface DecorationOps {
      * Cancel current target method invocation and return.
      *
      * @return cancel handler, with type () -> &lt;target method return type&gt;
+     *
+     * @apiNote A return statement <b>MUST</b> be followed after this call. When cases it may eliminate those returns,
+     * {@link #blackhole()} shall be used:
+     * <pre>
+     * {@code
+     * @Decorate(method = "test", at = @At(value = "INVOKE", target = "Ljava/io/PrintStream;println(Ljava/lang/String;)V"))
+     * public void inject(PrintStream s, String s2, @Local(ordinal = 0) Object o) throws Throwable {
+     *     if (s2.equals(o)) {
+     *         DecorationOps.callsite().invoke(s, s2);
+     *     } else {
+     *         DecorationOps.cancel().invoke();
+     *         return;
+     *     }
+     *     DecorationOps.blackhole().invoke();
+     * }
+     * }
+     * </pre>
      */
     static MethodHandle cancel() {
         throw new IllegalStateException("Not implemented.");

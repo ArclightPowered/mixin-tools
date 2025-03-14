@@ -883,8 +883,8 @@ public class Decorator extends Injector {
                     } else if (cancelReturn) {
                         if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN) {
                             cancelReturn = false;
-                        } else if (insn.getOpcode() >= 0 && insn.getOpcode() != Opcodes.CHECKCAST) {
-                            throw new InvalidInjectionException(info.getMixin(), "No corresponding return after cancel()");
+                        } else if (insn.getOpcode() >= 0 && insn.getOpcode() != Opcodes.CHECKCAST || insn.getType() == AbstractInsnNode.FRAME) {
+                            throw new InvalidInjectionException(info.getMixin(), "Return statement must be followed after cancel()");
                         }
                     } else {
                         insn.accept(this);
