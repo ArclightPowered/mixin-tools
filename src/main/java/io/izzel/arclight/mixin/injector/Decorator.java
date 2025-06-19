@@ -21,6 +21,7 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.spongepowered.asm.mixin.injection.InjectionPoint;
 import org.spongepowered.asm.mixin.injection.code.Injector;
 import org.spongepowered.asm.mixin.injection.points.MethodHead;
 import org.spongepowered.asm.mixin.injection.struct.InjectionInfo;
@@ -178,6 +179,19 @@ public class Decorator extends Injector {
 
     protected static class DecorationCodeStructure {
         private LabelNode loopStart, loopEnd, codeBlockEnd;
+    }
+
+    @Override
+    protected void sanityCheck(Target target, List<InjectionPoint> injectionPoints) {
+        super.sanityCheck(target, injectionPoints);
+        if (target.isStatic != isStatic) {
+            String msg = String.format(
+                    "static modifiers do not match: target is %s, decorator is %s",
+                    target.isStatic ? "static" : "not static",
+                    isStatic ? "static" : "not static"
+            );
+            throw new InvalidInjectionException(info, msg);
+        }
     }
 
     @Override
