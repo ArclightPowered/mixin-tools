@@ -166,7 +166,7 @@ public class Decorator extends Injector {
                 this.decorationTarget = DecorationTarget.NEW;
             } else if (this.node instanceof InsnNode insn && insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN) {
                 this.returnType = Type.VOID_TYPE;
-                this.handlerArgs = new Type[]{target.returnType};
+                this.handlerArgs = insn.getOpcode() == Opcodes.RETURN ? new Type[0] : new Type[]{target.returnType};
                 this.nodeEnd = this.node;
                 this.decorationTarget = DecorationTarget.RETURN;
             } else {
