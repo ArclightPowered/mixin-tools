@@ -16,8 +16,10 @@ import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LocalVariableNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
@@ -419,49 +421,59 @@ public class Decorator extends Injector {
         return data;
     }
 
-    private EnhancedAnalyzerAdapter localsAndStackAt(Target target, InjectionNode node, AbstractInsnNode label) {
+    private EnhancedAnalyzerAdapter localsAndStackAt(Target target, AbstractInsnNode endInsn) {
+        // target label -> jump insn list
+        var topo = new HashMap<AbstractInsnNode, List<AbstractInsnNode>>();
         var adapter = new EnhancedAnalyzerAdapter(target.classNode.name, target.method.access, target.method.name,
             target.method.desc, null);
-        var endInsn = label == null ? node.getCurrentTarget() : label;
         for (int i = target.insns.indexOf(endInsn), j = 0; j < i; j++) {
             var insnNode = target.insns.get(j);
             insnNode.accept(adapter);
-            if (label != null && insnNode instanceof JumpInsnNode jump && jump.label == label) {
-                endInsn = insnNode;
-                break;
+            if (insnNode instanceof JumpInsnNode jump) {
+                topo.computeIfAbsent(jump.label, k -> new ArrayList<>()).add(insnNode);
+            } else if (insnNode instanceof TableSwitchInsnNode ts) {
+                for (var label : ts.labels) {
+                    topo.computeIfAbsent(label, k -> new ArrayList<>()).add(insnNode);
+                }
+                topo.computeIfAbsent(ts.dflt, k -> new ArrayList<>()).add(insnNode);
+            } else if (insnNode instanceof LookupSwitchInsnNode ls) {
+                for (var label : ls.labels) {
+                    topo.computeIfAbsent(label, k -> new ArrayList<>()).add(insnNode);
+                }
+                topo.computeIfAbsent(ls.dflt, k -> new ArrayList<>()).add(insnNode);
             }
         }
-        // other transformers inserted control flow end
-        if (adapter.locals == null) {
-            LabelNode lastEnter = null;
-            for (int i = target.insns.indexOf(endInsn), j = i - 1; j >= 0; j--) {
-                var insn = target.insns.get(j);
-                if (insn instanceof LabelNode) {
-                    if (lastEnter == null) {
-                        lastEnter = (LabelNode) insn;
-                    } else {
-                        throw new InvalidInjectionException(this.info, "Multiple enter labels");
-                    }
-                } else if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN || insn.getOpcode() == Opcodes.ATHROW || insn.getOpcode() == Opcodes.GOTO) {
-                    if (lastEnter != null) {
-                        break;
-                    } else {
-                        throw new InvalidInjectionException(this.info, "Injected into dead code");
-                    }
-                }
-            }
-            if (lastEnter == null) {
-                throw new InvalidInjectionException(this.info, "Injected into dead code?");
-            }
-            return localsAndStackAt(target, node, lastEnter);
-        } else {
+        if (adapter.locals != null) {
             return adapter;
         }
+        // other transformers inserted control flow end
+        for (int i = target.insns.indexOf(endInsn), j = i - 1; j >= 0; j--) {
+            var insn = target.insns.get(j);
+            if (topo.containsKey(insn)) {
+                for (var jump : topo.get(insn)) {
+                    var src = localsAndStackAt(target, jump);
+                    jump.accept(src);
+                    if (src.locals == null) {
+                        continue;
+                    }
+                    for (int k = target.insns.indexOf(endInsn), l = target.insns.indexOf(insn); l < k; l++) {
+                        var insnNode = target.insns.get(l);
+                        insnNode.accept(src);
+                    }
+                    if (src.locals != null) {
+                        return src;
+                    }
+                }
+            } else if (insn.getOpcode() >= Opcodes.IRETURN && insn.getOpcode() <= Opcodes.RETURN || insn.getOpcode() == Opcodes.ATHROW || insn.getOpcode() == Opcodes.GOTO) {
+                throw new InvalidInjectionException(this.info, "Injected into dead code");
+            }
+        }
+        throw new InvalidInjectionException(this.info, "Injected into dead code?");
     }
 
     private void guardInline(Target target, InjectionNode node, DecorationData decorationData,
                              Type[] handlerTypes) {
-        var adapter = localsAndStackAt(target, node, null);
+        var adapter = localsAndStackAt(target, node.getCurrentTarget());
         var currentLocal = adapter.getCurrent(adapter.locals);
         var currentStack = adapter.getCurrent(adapter.stack);
         decorationData.targetLocals = currentLocal;
